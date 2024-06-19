@@ -19,10 +19,12 @@ import com.facebook.react.common.annotations.VisibleForTesting;
 import com.facebook.react.module.annotations.ReactModule;
 import com.facebook.react.uimanager.PixelUtil;
 import com.facebook.react.uimanager.PointerEvents;
+import com.facebook.react.uimanager.ReactStylesDiffMap;
 import com.facebook.react.uimanager.Spacing;
 import com.facebook.react.uimanager.ThemedReactContext;
 import com.facebook.react.uimanager.UIManagerHelper;
 import com.facebook.react.uimanager.ViewManagerDelegate;
+import com.facebook.react.uimanager.ViewManagerPropertyUpdater;
 import com.facebook.react.uimanager.ViewProps;
 import com.facebook.react.uimanager.annotations.ReactProp;
 import com.facebook.react.uimanager.annotations.ReactPropGroup;
@@ -375,5 +377,11 @@ public class ShadowViewManager extends ReactClippingViewManager<ReactViewGroup> 
   @Override
   public void setPressed(ReactViewGroup view, boolean pressed) {
     view.setPressed(pressed);
+  }
+
+  @Override
+  public void updateProperties(@NonNull ReactViewGroup viewToUpdate, ReactStylesDiffMap props) {
+    ViewManagerPropertyUpdater.updateProps(this, viewToUpdate, props);
+    onAfterUpdateTransaction(viewToUpdate);
   }
 }

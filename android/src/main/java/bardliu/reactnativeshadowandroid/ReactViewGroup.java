@@ -47,6 +47,7 @@ import com.facebook.react.uimanager.ReactClippingProhibitedView;
 import com.facebook.react.uimanager.ReactClippingViewGroup;
 import com.facebook.react.uimanager.ReactClippingViewGroupHelper;
 import com.facebook.react.uimanager.ReactOverflowView;
+import com.facebook.react.uimanager.ReactOverflowViewWithInset;
 import com.facebook.react.uimanager.ReactPointerEventsView;
 import com.facebook.react.uimanager.ReactZIndexedViewGroup;
 import com.facebook.react.uimanager.RootView;
@@ -55,24 +56,25 @@ import com.facebook.react.uimanager.ViewGroupDrawingOrderHelper;
 import com.facebook.react.uimanager.ViewProps;
 import com.facebook.react.uimanager.common.UIManagerType;
 import com.facebook.react.uimanager.common.ViewUtil;
+import com.facebook.react.views.view.CanvasUtil;
 import com.facebook.yoga.YogaConstants;
 
 /**
  * Backing for a React View. Has support for borders, but since borders aren't common, lazy
  * initializes most of the storage needed for them.
  */
-@TargetApi(Build.VERSION_CODES.LOLLIPOP)
 public class ReactViewGroup extends ViewGroup
     implements ReactInterceptingViewGroup,
         ReactClippingViewGroup,
         ReactPointerEventsView,
         ReactHitSlopView,
         ReactZIndexedViewGroup,
-        ReactOverflowView {
+        ReactOverflowViewWithInset {
 
   private static final int ARRAY_CAPACITY_INCREMENT = 12;
   private static final int DEFAULT_BACKGROUND_COLOR = Color.TRANSPARENT;
-  private static final LayoutParams sDefaultLayoutParam = new LayoutParams(0, 0);
+  private static final LayoutParams sDefaultLayoutParam = new ViewGroup.LayoutParams(0, 0);
+  private final Rect mOverflowInset = new Rect();
   /* should only be used in {@link #updateClippingToRect} */
   private static final Rect sHelperRect = new Rect();
 
@@ -84,7 +86,7 @@ public class ReactViewGroup extends ViewGroup
    * <p>TODO(7728005): Attach/detach views in batch - once per frame in case when multiple children
    * update their layout.
    */
-  private static final class ChildrenLayoutChangeListener implements OnLayoutChangeListener {
+  private static final class ChildrenLayoutChangeListener implements View.OnLayoutChangeListener {
 
     private final ReactViewGroup mParent;
 
@@ -117,27 +119,26 @@ public class ReactViewGroup extends ViewGroup
   // whenever the option is set. We also override {@link ViewGroup#getChildAt} and
   // {@link ViewGroup#getChildCount} so those methods may return views that are not attached.
   // This is risky but allows us to perform a correct cleanup in {@link NativeViewHierarchyManager}.
-  private boolean mRemoveClippedSubviews = false;
-  private @Nullable View[] mAllChildren = null;
+  private boolean mRemoveClippedSubviews;
+  private @Nullable View[] mAllChildren;
   private int mAllChildrenCount;
   private @Nullable Rect mClippingRect;
   private @Nullable Rect mHitSlopRect;
   private @Nullable String mOverflow;
-  private PointerEvents mPointerEvents = PointerEvents.AUTO;
+  private PointerEvents mPointerEvents;
   private @Nullable ChildrenLayoutChangeListener mChildrenLayoutChangeListener;
-  private @Nullable
-  ReactViewBackgroundDrawable mReactBackgroundDrawable;
+  private @Nullable ReactViewBackgroundDrawable mReactBackgroundDrawable;
   private @Nullable OnInterceptTouchEventListener mOnInterceptTouchEventListener;
-  private boolean mNeedsOffscreenAlphaCompositing = false;
-  private @Nullable ViewGroupDrawingOrderHelper mDrawingOrderHelper = null;
+  private boolean mNeedsOffscreenAlphaCompositing;
+  private @Nullable ViewGroupDrawingOrderHelper mDrawingOrderHelper;
   private @Nullable Path mPath;
   private int mLayoutDirection;
-  private float mBackfaceOpacity = 1.f;
-  private String mBackfaceVisibility = "visible";
+  private float mBackfaceOpacity;
+  private String mBackfaceVisibility;
 
   public ReactViewGroup(Context context) {
     super(context);
-    setClipChildren(false);
+    initView();
   }
 
   public void setShadowRadius(float shadowRadius) {
@@ -161,6 +162,47 @@ public class ReactViewGroup extends ViewGroup
 
   public void setShadowColor(float rgb, float alpha) {
     getOrCreateReactViewBackground().setShadowColor(rgb, alpha);
+  }
+
+  /**
+   * Set all default values here as opposed to in the constructor or field defaults. It is important
+   * that these properties are set during the constructor, but also on-demand whenever an existing
+   * ReactTextView is recycled.
+   */
+  private void initView() {
+    setClipChildren(false);
+
+    mRemoveClippedSubviews = false;
+    mAllChildren = null;
+    mAllChildrenCount = 0;
+    mClippingRect = null;
+    mHitSlopRect = null;
+    mOverflow = null;
+    mPointerEvents = PointerEvents.AUTO;
+    mChildrenLayoutChangeListener = null;
+    mReactBackgroundDrawable = null;
+    mOnInterceptTouchEventListener = null;
+    mNeedsOffscreenAlphaCompositing = false;
+    mDrawingOrderHelper = null;
+    mPath = null;
+    mLayoutDirection = 0; // set when background is created
+    mBackfaceOpacity = 1.f;
+    mBackfaceVisibility = "visible";
+  }
+
+  /* package */ void recycleView() {
+    // Set default field values
+    initView();
+    mOverflowInset.setEmpty();
+    sHelperRect.setEmpty();
+
+    // Remove any children
+    removeAllViews();
+
+    // Reset background, borders
+    updateBackgroundDrawable(null);
+
+    resetPointerEvents();
   }
 
   private ViewGroupDrawingOrderHelper getDrawingOrderHelper() {
@@ -249,7 +291,7 @@ public class ReactViewGroup extends ViewGroup
       return true;
     }
     // We intercept the touch event if the children are not supposed to receive it.
-    if (mPointerEvents == PointerEvents.NONE || mPointerEvents == PointerEvents.BOX_ONLY) {
+    if (!PointerEvents.canChildrenBeTouchTarget(mPointerEvents)) {
       return true;
     }
     return super.onInterceptTouchEvent(ev);
@@ -258,7 +300,7 @@ public class ReactViewGroup extends ViewGroup
   @Override
   public boolean onTouchEvent(MotionEvent ev) {
     // We do not accept the touch event if this view is not supposed to receive it.
-    if (mPointerEvents == PointerEvents.NONE || mPointerEvents == PointerEvents.BOX_NONE) {
+    if (!PointerEvents.canBeTouchTarget(mPointerEvents)) {
       return false;
     }
     // The root view always assumes any view that was tapped wants the touch
@@ -267,6 +309,16 @@ public class ReactViewGroup extends ViewGroup
     // For an explanation of bubbling and capturing, see
     // http://javascript.info/tutorial/bubbling-and-capturing#capturing
     return true;
+  }
+
+  @Override
+  public boolean dispatchGenericPointerEvent(MotionEvent ev) {
+    // We do not dispatch the pointer event if its children are not supposed to receive it
+    if (!PointerEvents.canChildrenBeTouchTarget(mPointerEvents)) {
+      return false;
+    }
+
+    return super.dispatchGenericPointerEvent(ev);
   }
 
   /**
@@ -395,10 +447,10 @@ public class ReactViewGroup extends ViewGroup
     if (!intersects && child.getParent() != null && !isAnimating) {
       // We can try saving on invalidate call here as the view that we remove is out of visible area
       // therefore invalidation is not necessary.
-      super.removeViewsInLayout(idx - clippedSoFar, 1);
+      removeViewsInLayout(idx - clippedSoFar, 1);
       needUpdateClippingRecursive = true;
     } else if (intersects && child.getParent() == null) {
-      super.addViewInLayout(child, idx - clippedSoFar, sDefaultLayoutParam, true);
+      addViewInLayout(child, idx - clippedSoFar, sDefaultLayoutParam, true);
       invalidate();
       needUpdateClippingRecursive = true;
     } else if (intersects) {
@@ -493,23 +545,18 @@ public class ReactViewGroup extends ViewGroup
     return ViewUtil.getUIManagerType(getId()) == UIManagerType.FABRIC;
   }
 
-  @Override
-  public void addView(View child, int index, LayoutParams params) {
-    // This will get called for every overload of addView so there is not need to override every
-    // method.
+  private void handleAddView(View view) {
+    UiThreadUtil.assertOnUiThread();
 
     if (!customDrawOrderDisabled()) {
-      getDrawingOrderHelper().handleAddView(child);
+      getDrawingOrderHelper().handleAddView(view);
       setChildrenDrawingOrderEnabled(getDrawingOrderHelper().shouldEnableCustomDrawingOrder());
     } else {
       setChildrenDrawingOrderEnabled(false);
     }
-
-    super.addView(child, index, params);
   }
 
-  @Override
-  public void removeView(View view) {
+  private void handleRemoveView(View view) {
     UiThreadUtil.assertOnUiThread();
 
     if (!customDrawOrderDisabled()) {
@@ -518,22 +565,60 @@ public class ReactViewGroup extends ViewGroup
     } else {
       setChildrenDrawingOrderEnabled(false);
     }
+  }
 
+  private void handleRemoveViews(int start, int count) {
+    int endIndex = start + count;
+    for (int index = start; index < endIndex; index++) {
+      if (index < getChildCount()) {
+        handleRemoveView(getChildAt(index));
+      }
+    }
+  }
+
+  @Override
+  public void addView(View child, int index, ViewGroup.LayoutParams params) {
+    // This will get called for every overload of addView so there is not need to override every
+    // method.
+    handleAddView(child);
+    super.addView(child, index, params);
+  }
+
+  @Override
+  protected boolean addViewInLayout(
+      View child, int index, LayoutParams params, boolean preventRequestLayout) {
+    handleAddView(child);
+    return super.addViewInLayout(child, index, params, preventRequestLayout);
+  }
+
+  @Override
+  public void removeView(View view) {
+    handleRemoveView(view);
     super.removeView(view);
   }
 
   @Override
   public void removeViewAt(int index) {
-    UiThreadUtil.assertOnUiThread();
-
-    if (!customDrawOrderDisabled()) {
-      getDrawingOrderHelper().handleRemoveView(getChildAt(index));
-      setChildrenDrawingOrderEnabled(getDrawingOrderHelper().shouldEnableCustomDrawingOrder());
-    } else {
-      setChildrenDrawingOrderEnabled(false);
-    }
-
+    handleRemoveView(getChildAt(index));
     super.removeViewAt(index);
+  }
+
+  @Override
+  public void removeViewInLayout(View view) {
+    handleRemoveView(view);
+    super.removeViewInLayout(view);
+  }
+
+  @Override
+  public void removeViewsInLayout(int start, int count) {
+    handleRemoveViews(start, count);
+    super.removeViewsInLayout(start, count);
+  }
+
+  @Override
+  public void removeViews(int start, int count) {
+    handleRemoveViews(start, count);
+    super.removeViews(start, count);
   }
 
   @Override
@@ -585,6 +670,10 @@ public class ReactViewGroup extends ViewGroup
     mPointerEvents = pointerEvents;
   }
 
+  /*package*/ void resetPointerEvents() {
+    mPointerEvents = PointerEvents.AUTO;
+  }
+
   /*package*/ int getAllChildrenCount() {
     return mAllChildrenCount;
   }
@@ -598,7 +687,7 @@ public class ReactViewGroup extends ViewGroup
   }
 
   /*package*/ void addViewWithSubviewClippingEnabled(
-      final View child, int index, LayoutParams params) {
+      final View child, int index, ViewGroup.LayoutParams params) {
     Assertions.assertCondition(mRemoveClippedSubviews);
     Assertions.assertNotNull(mClippingRect);
     Assertions.assertNotNull(mAllChildren);
@@ -653,7 +742,7 @@ public class ReactViewGroup extends ViewGroup
           clippedSoFar++;
         }
       }
-      super.removeViewsInLayout(index - clippedSoFar, 1);
+      removeViewsInLayout(index - clippedSoFar, 1);
     }
     removeFromArray(index);
   }
@@ -728,7 +817,7 @@ public class ReactViewGroup extends ViewGroup
     return DEFAULT_BACKGROUND_COLOR;
   }
 
-  private ReactViewBackgroundDrawable getOrCreateReactViewBackground() {
+  /* package */ ReactViewBackgroundDrawable getOrCreateReactViewBackground() {
     if (mReactBackgroundDrawable == null) {
       mReactBackgroundDrawable = new ReactViewBackgroundDrawable(getContext());
       Drawable backgroundDrawable = getBackground();
@@ -769,6 +858,16 @@ public class ReactViewGroup extends ViewGroup
     return mOverflow;
   }
 
+  @Override
+  public void setOverflowInset(int left, int top, int right, int bottom) {
+    mOverflowInset.set(left, top, right, bottom);
+  }
+
+  @Override
+  public Rect getOverflowInset() {
+    return mOverflowInset;
+  }
+
   /**
    * Set the background for the view or remove the background. It calls {@link
    * #setBackground(Drawable)} or {@link #setBackgroundDrawable(Drawable)} based on the sdk version.
@@ -776,7 +875,7 @@ public class ReactViewGroup extends ViewGroup
    * @param drawable {@link Drawable} The Drawable to use as the background, or null to remove the
    *     background
    */
-  private void updateBackgroundDrawable(Drawable drawable) {
+  /* package */ void updateBackgroundDrawable(Drawable drawable) {
     super.setBackground(drawable);
   }
 
@@ -803,6 +902,22 @@ public class ReactViewGroup extends ViewGroup
     }
   }
 
+  @Override
+  protected boolean drawChild(Canvas canvas, View child, long drawingTime) {
+    boolean drawWithZ = child.getElevation() > 0;
+
+    if (drawWithZ) {
+      CanvasUtil.enableZ(canvas, true);
+    }
+
+    boolean result = super.drawChild(canvas, child, drawingTime);
+
+    if (drawWithZ) {
+      CanvasUtil.enableZ(canvas, false);
+    }
+    return result;
+  }
+
   private void dispatchOverflowDraw(Canvas canvas) {
     if (mOverflow != null) {
       switch (mOverflow) {
@@ -812,6 +927,7 @@ public class ReactViewGroup extends ViewGroup
           }
           break;
         case ViewProps.HIDDEN:
+        case ViewProps.SCROLL:
           float left = 0f;
           float top = 0f;
           float right = getWidth();

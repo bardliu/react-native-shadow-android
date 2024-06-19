@@ -152,4 +152,4 @@ const ShadowView = React.forwardRef(
 
 ShadowView.displayName = 'ShadowView';
 
-module.exports = ShadowView;
+export default ShadowView;
