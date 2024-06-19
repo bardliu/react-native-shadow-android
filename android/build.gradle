@@ -1,16 +1,11 @@
 buildscript {
-  // Buildscript is evaluated before everything else so we can't use getExtOrDefault
-  def kotlin_version = rootProject.ext.has('kotlinVersion') ? rootProject.ext.get('kotlinVersion') : project.properties['ShadowAndroid_kotlinVersion']
-
   repositories {
       google()
       mavenCentral()
   }
 
   dependencies {
-    classpath 'com.android.tools.build:gradle:3.5.3'
-    // noinspection DifferentKotlinGradleVersion
-    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    classpath("com.android.tools.build:gradle:7.4.2")
   }
 }
 
@@ -19,10 +14,9 @@ def isNewArchitectureEnabled() {
 }
 
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
 
 if (isNewArchitectureEnabled()) {
-  apply plugin: 'com.facebook.react'
+  apply plugin: "com.facebook.react"
 }
 
 def getExtOrDefault(name) {
@@ -34,6 +28,10 @@ def getExtOrIntegerDefault(name) {
 }
 
 android {
+  def agpVersion = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION
+  if (agpVersion.tokenize('.')[0].toInteger() >= 7) {
+      namespace 'bardliu.reactnativeshadowandroid'
+  }
   compileSdkVersion getExtOrIntegerDefault('compileSdkVersion')
 
   defaultConfig {
@@ -51,9 +49,14 @@ android {
     disable 'GradleCompatible'
   }
 
-  compileOptions {
-    sourceCompatibility JavaVersion.VERSION_1_8
-    targetCompatibility JavaVersion.VERSION_1_8
+  sourceSets.main {
+    java {
+      if (isNewArchitectureEnabled()) {
+        java.srcDirs += ['src/newarch', "build/generated/source/codegen/java"]
+      } else {
+        java.srcDirs += ['src/oldarch']
+      }
+    }
   }
 }
 
@@ -127,20 +130,6 @@ repositories {
   }
 }
 
-def kotlin_version = getExtOrDefault('kotlinVersion')
-
 dependencies {
-    //noinspection GradleDynamicVersion
-  implementation "com.facebook.react:react-native:+"
-  implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
-  implementation "androidx.core:core-ktx:$kotlin_version"
-// From node_modules
-}
-
-if (isNewArchitectureEnabled()) {
-  react {
-    jsRootDir = file("../src/")
-    libraryName = "ShadowAndroid"
-    codegenJavaPackageName = "bardliu.reactnativeshadowandroid"
-  }
+  implementation 'com.facebook.react:react-native'
 }
